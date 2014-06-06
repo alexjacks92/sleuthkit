@@ -25,6 +25,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -58,13 +60,13 @@ import org.sqlite.SQLiteJDBCLoader;
  * database implementations (such as SQLite) that might need it.
  */
 public class SleuthkitCase {
-	private String dbPath;
-	private String dbDirPath;
+	private final String dbPath;
+	private final String dbDirPath;
 	private int versionNumber;
 	private String dbBackupPath = null;
 	private volatile SleuthkitJNI.CaseDbHandle caseHandle;
 	private volatile Connection con;
-	private ResultSetHelper rsHelper = new ResultSetHelper(this);
+	private final ResultSetHelper rsHelper = new ResultSetHelper(this);
 	private int artifactIDcounter = 1001;
 	private int attributeIDcounter = 1001;
 	// for use by getCarvedDirectoryId method only
@@ -86,7 +88,9 @@ public class SleuthkitCase {
 	private PreparedStatement getArtifactsHelper2St;
 	private PreparedStatement getArtifactsCountHelperSt;
 	private PreparedStatement getAbstractFileChildren;
+	private PreparedStatement getAbstractFileChildrenByType;
 	private PreparedStatement getAbstractFileChildrenIds;
+	private PreparedStatement getAbstractFileChildrenIdsByType;
 	private PreparedStatement getAbstractFileById;
 	private PreparedStatement addArtifactSt1;
 	private PreparedStatement getLastArtifactId;
@@ -107,7 +111,7 @@ public class SleuthkitCase {
 	private PreparedStatement addFileSt;
 	private PreparedStatement addLayoutFileSt;
 	private PreparedStatement addPathSt;
-	private PreparedStatement hasChildrenSt;
+	private PreparedStatement countChildrenSt;
 	private PreparedStatement getLastContentIdSt;
 	private PreparedStatement getFsIdForFileIdSt;
 	private PreparedStatement selectAllFromTagNames;
@@ -219,7 +223,7 @@ public class SleuthkitCase {
 		statement.execute("CREATE TABLE blackboard_artifact_tags (tag_id INTEGER PRIMARY KEY, artifact_id INTEGER NOT NULL, tag_name_id INTEGER NOT NULL, comment TEXT NOT NULL)");
 
 		// Add new table for reports
-		statement.execute("CREATE TABLE reports (report_id INTEGER PRIMARY KEY, path TEXT NOT NULL, crtime INTEGER NOT NULL, display_name TEXT NOT NULL)");
+		statement.execute("CREATE TABLE reports (report_id INTEGER PRIMARY KEY, path TEXT NOT NULL, crtime INTEGER NOT NULL, src_module_name TEXT NOT NULL, report_name TEXT NOT NULL)");
 		
         // add columns for existing tables
         statement.execute("ALTER TABLE tsk_image_info ADD COLUMN size INTEGER;");
@@ -365,6 +369,10 @@ public class SleuthkitCase {
 				"SELECT COUNT(*) FROM blackboard_artifacts WHERE obj_id = ? AND artifact_type_id = ?");
 
 		getAbstractFileChildren = con.prepareStatement(
+				"SELECT tsk_files.* FROM tsk_objects JOIN tsk_files "
+				+ "ON tsk_objects.obj_id=tsk_files.obj_id WHERE (tsk_objects.par_obj_id = ? )");
+		
+		getAbstractFileChildrenByType = con.prepareStatement(
 				"SELECT tsk_files.* "
 				+ "FROM tsk_objects JOIN tsk_files "
 				+ "ON tsk_objects.obj_id=tsk_files.obj_id "
@@ -372,6 +380,10 @@ public class SleuthkitCase {
 				+ "AND tsk_files.type = ? )");
 
 		getAbstractFileChildrenIds = con.prepareStatement(
+				"SELECT tsk_files.obj_id FROM tsk_objects JOIN tsk_files "
+				+ "ON tsk_objects.obj_id=tsk_files.obj_id WHERE (tsk_objects.par_obj_id = ?)");
+		
+		getAbstractFileChildrenIdsByType = con.prepareStatement(
 				"SELECT tsk_files.obj_id "
 				+ "FROM tsk_objects JOIN tsk_files "
 				+ "ON tsk_objects.obj_id=tsk_files.obj_id "
@@ -443,7 +455,7 @@ public class SleuthkitCase {
 		addPathSt = con.prepareStatement(
 				"INSERT INTO tsk_files_path (obj_id, path) VALUES (?, ?)");
 
-		hasChildrenSt = con.prepareStatement(
+		countChildrenSt = con.prepareStatement(
 				"SELECT COUNT(obj_id) FROM tsk_objects WHERE par_obj_id = ?");
 
 		getFsIdForFileIdSt = con.prepareStatement(
@@ -489,7 +501,7 @@ public class SleuthkitCase {
 		
 		selectMaxIdFromReports = con.prepareStatement("SELECT MAX(report_id) FROM reports");		
 		
-		insertIntoReports =  con.prepareStatement("INSERT INTO reports (path, crtime, display_name) VALUES (?, ?, ?)");
+		insertIntoReports =  con.prepareStatement("INSERT INTO reports (path, crtime, src_module_name, report_name) VALUES (?, ?, ?, ?)");
 	}
 
 	private void closeStatements() {
@@ -502,7 +514,9 @@ public class SleuthkitCase {
 		closeStatement(getArtifactsHelper2St);
 		closeStatement(getArtifactsCountHelperSt);
 		closeStatement(getAbstractFileChildren);
+		closeStatement(getAbstractFileChildrenByType);
 		closeStatement(getAbstractFileChildrenIds);
+		closeStatement(getAbstractFileChildrenIdsByType);
 		closeStatement(getAbstractFileById);
 		closeStatement(addArtifactSt1);
 		closeStatement(getLastArtifactId);
@@ -524,7 +538,7 @@ public class SleuthkitCase {
 		closeStatement(addFileSt);
 		closeStatement(addLayoutFileSt);
 		closeStatement(addPathSt);
-		closeStatement(hasChildrenSt);
+		closeStatement(countChildrenSt);
 		closeStatement(getFsIdForFileIdSt);
 		closeStatement(selectAllFromTagNames);
 		closeStatement(selectFromTagNamesWhereInUse);
@@ -1352,6 +1366,9 @@ public class SleuthkitCase {
 	 */
 	public ArrayList<BlackboardArtifact> getBlackboardArtifacts(String artifactTypeName, long obj_id) throws TskCoreException {
 		int artifactTypeID = this.getArtifactTypeID(artifactTypeName);
+		if (artifactTypeID == -1) {
+			return new ArrayList<BlackboardArtifact>();
+		}
 		return getArtifactsHelper(artifactTypeID, artifactTypeName, obj_id);
 	}
 
@@ -1395,6 +1412,9 @@ public class SleuthkitCase {
 	 */
 	public long getBlackboardArtifactsCount(String artifactTypeName, long obj_id) throws TskCoreException {
 		int artifactTypeID = this.getArtifactTypeID(artifactTypeName);
+		if (artifactTypeID == -1) {
+			return 0;
+		}
 		return getArtifactsCountHelper(artifactTypeID, obj_id);
 	}
 
@@ -1436,6 +1456,9 @@ public class SleuthkitCase {
 	 */
 	public ArrayList<BlackboardArtifact> getBlackboardArtifacts(String artifactTypeName) throws TskCoreException {
 		int artifactTypeID = this.getArtifactTypeID(artifactTypeName);
+		if (artifactTypeID == -1) {
+			return new ArrayList<BlackboardArtifact>();
+		}
 		return getArtifactsHelper(artifactTypeID, artifactTypeName);
 	}
 
@@ -1686,34 +1709,44 @@ public class SleuthkitCase {
 	}
 
 	/**
-	 * Get the attribute id that corresponds to the given string. If that string
-	 * does not exist it will be added to the table.
+	 * Get the attribute type id associated with an attribute type name.
 	 *
-	 * @param attrTypeString attribute type string
-	 * @return attribute id
-	 * @throws TskCoreException exception thrown if a critical error occurs
-	 * within tsk core
+	 * @param attrTypeName An attribute type name.
+	 * @return An attribute id or -1 if the attribute type does not exist.
+	 * @throws TskCoreException If an error occurs accessing the case database.
+	 * 
 	 */
-	public int getAttrTypeID(String attrTypeString) throws TskCoreException {
+	public int getAttrTypeID(String attrTypeName) throws TskCoreException {
 		dbReadLock();
+		Statement statement = null;
+		ResultSet resultSet = null;
 		try {
-			Statement s = con.createStatement();
-			ResultSet rs;
-
-			rs = s.executeQuery("SELECT attribute_type_id FROM blackboard_attribute_types WHERE type_name = '" + attrTypeString + "'");
-			if (rs.next()) {
-				int type = rs.getInt(1);
-				rs.close();
-				s.close();
-				return type;
-			} else {
-				rs.close();
-				s.close();
-				throw new TskCoreException("No id with that name");
+			int typeId = -1;
+			statement = con.createStatement();
+			resultSet = statement.executeQuery("SELECT attribute_type_id FROM blackboard_attribute_types WHERE type_name = '" + attrTypeName + "'");
+			if (resultSet.next()) {
+				typeId = resultSet.getInt(1);
 			}
+			return typeId;
 		} catch (SQLException ex) {
-			throw new TskCoreException("Error getting attribute type id.", ex);
+			throw new TskCoreException("Error getting attribute type id: ", ex);
 		} finally {
+			// Note: this can be done much more cleanly and simply with 
+			// try-with-resources in Java 7 or higher.
+			try {
+				if (resultSet != null) {
+					resultSet.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close ResultSet", ex);
+			}
+			try {
+				if (statement != null) {
+					statement.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close Statement", ex);
+			}
 			dbReadUnlock();
 		}
 	}
@@ -1787,39 +1820,48 @@ public class SleuthkitCase {
 	}
 
 	/**
-	 * Get artifact type id for the given string. Will throw an error if one
-	 * with that name does not exist.
+	 * Get the artifact type id associated with an artifact type name.
 	 *
-	 * @param artifactTypeString name for an artifact type
-	 * @return artifact type
-	 * @throws TskCoreException exception thrown if a critical error occurs
-	 * within tsk core
+	 * @param attrTypeName An artifact type name.
+	 * @return An artifact id or -1 if the attribute type does not exist.
+	 * @throws TskCoreException If an error occurs accessing the case database.
+	 * 
 	 */
-	int getArtifactTypeID(String artifactTypeString) throws TskCoreException {
+	public int getArtifactTypeID(String artifactTypeName) throws TskCoreException {
 		dbReadLock();
+		Statement statement = null;
+		ResultSet resultSet = null;
 		try {
-			Statement s = con.createStatement();
-			ResultSet rs;
-
-			rs = s.executeQuery("SELECT artifact_type_id FROM blackboard_artifact_types WHERE type_name = '" + artifactTypeString + "'");
-			if (rs.next()) {
-				int type = rs.getInt(1);
-				rs.close();
-				s.close();
-				return type;
-			} else {
-				rs.close();
-				s.close();
-				throw new TskCoreException("No artifact with that name exists");
+			int typeId = -1;
+			statement = con.createStatement();
+			resultSet = statement.executeQuery("SELECT artifact_type_id FROM blackboard_artifact_types WHERE type_name = '" + artifactTypeName + "'");
+			if (resultSet.next()) {
+				typeId = resultSet.getInt(1);
 			}
-
+			return typeId;
 		} catch (SQLException ex) {
-			throw new TskCoreException("Error getting artifact type id." + ex.getMessage(), ex);
+			throw new TskCoreException("Error getting artifact type id: " + ex.getMessage(), ex);
 		} finally {
+			// Note: this can be done much more cleanly and simply with 
+			// try-with-resources in Java 7 or higher.
+			try {
+				if (resultSet != null) {
+					resultSet.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close ResultSet", ex);
+			}
+			try {
+				if (statement != null) {
+					statement.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close Statement", ex);
+			}			
 			dbReadUnlock();
 		}
 	}
-
+	
 	/**
 	 * Get artifact type name for the given string. Will throw an error if that
 	 * artifact doesn't exist. Use addArtifactType(...) to create a new one.
@@ -2162,8 +2204,8 @@ public class SleuthkitCase {
 		ResultSet rs = null;
 		dbReadLock();
 		try {
-			hasChildrenSt.setLong(1, content.getId());
-			rs = hasChildrenSt.executeQuery();
+			countChildrenSt.setLong(1, content.getId());
+			rs = countChildrenSt.executeQuery();
 			if (rs.next()) {
 				hasChildren = rs.getInt(1) > 0;
 			}
@@ -2201,8 +2243,8 @@ public class SleuthkitCase {
 		ResultSet rs = null;
 		dbReadLock();
 		try {
-			hasChildrenSt.setLong(1, content.getId());
-			rs = hasChildrenSt.executeQuery();
+			countChildrenSt.setLong(1, content.getId());
+			rs = countChildrenSt.executeQuery();
 			if (rs.next()) {
 				countChildren = rs.getInt(1);
 			}
@@ -2225,7 +2267,7 @@ public class SleuthkitCase {
 	}
 
 	/**
-	 * Returns the list of AbstractFile Children for a given AbstractFileParent
+	 * Returns the list of AbstractFile Children of a given type for a given AbstractFileParent
 	 *
 	 * @param parent the content parent to get abstract file children for
 	 * @param type children type to look for, defined in TSK_DB_FILES_TYPE_ENUM
@@ -2234,53 +2276,120 @@ public class SleuthkitCase {
 	 */
 	List<Content> getAbstractFileChildren(Content parent, TSK_DB_FILES_TYPE_ENUM type) throws TskCoreException {
 
-		List<Content> children = new ArrayList<Content>();
+		List<Content> children;
 		
 		dbReadLock();
 		try {
-
+			
 			long parentId = parent.getId();
-
+			getAbstractFileChildrenByType.setLong(1, parentId);
+			getAbstractFileChildrenByType.setShort(2, type.getFileType());
+			
+			final ResultSet rs = getAbstractFileChildrenByType.executeQuery();
+			children = fileChildrenResultSetHelper (rs, parentId);
+			rs.close();
+			
+		} catch (SQLException ex) {
+			throw new TskCoreException("Error getting AbstractFile children for Content.", ex);
+		} finally {
+			dbReadUnlock();
+		}
+		return children;
+	}
+	
+	/**
+	 * Returns the list of all AbstractFile Children for a given AbstractFileParent
+	 *
+	 * @param parent the content parent to get abstract file children for
+	 * @param type children type to look for, defined in TSK_DB_FILES_TYPE_ENUM
+	 * @throws TskCoreException exception thrown if a critical error occurs
+	 * within tsk core
+	 */
+	List<Content> getAbstractFileChildren(Content parent) throws TskCoreException {
+		List<Content> children;
+		
+		dbReadLock();
+		try {
+			
+			long parentId = parent.getId();
 			getAbstractFileChildren.setLong(1, parentId);
-			getAbstractFileChildren.setShort(2, type.getFileType());
-
+			
 			final ResultSet rs = getAbstractFileChildren.executeQuery();
+			children = fileChildrenResultSetHelper (rs, parentId);
+			rs.close();
+			
+		} catch (SQLException ex) {
+			throw new TskCoreException("Error getting AbstractFile children for Content.", ex);
+		} finally {
+			dbReadUnlock();
+		}
+		return children;
+	}
+	
+	private List<Content> fileChildrenResultSetHelper (ResultSet rs, long parentId) throws SQLException {
+		List<Content> children = new ArrayList<Content>();
+		
+		while (rs.next()) {
+			TSK_DB_FILES_TYPE_ENUM type = TSK_DB_FILES_TYPE_ENUM.valueOf(rs.getShort("type"));
+
+			if (type == TSK_DB_FILES_TYPE_ENUM.FS) {
+				FsContent result;
+				if (rs.getShort("meta_type") == TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_DIR.getValue()) {
+					result = rsHelper.directory(rs, null);
+				} else {
+					result = rsHelper.file(rs, null);
+				}
+				children.add(result);
+			} else if (type == TSK_DB_FILES_TYPE_ENUM.VIRTUAL_DIR) {
+				VirtualDirectory virtDir = rsHelper.virtualDirectory(rs);
+				children.add(virtDir);
+			} else if (type == TSK_DB_FILES_TYPE_ENUM.UNALLOC_BLOCKS
+					|| type == TSK_DB_FILES_TYPE_ENUM.CARVED) {
+				String parentPath = rs.getString("parent_path");
+				if (parentPath == null) {
+					parentPath = "";
+				}
+				final LayoutFile lf =
+						new LayoutFile(this, rs.getLong("obj_id"), rs.getString("name"),
+						type,
+						TSK_FS_NAME_TYPE_ENUM.valueOf(rs.getShort("dir_type")),
+						TSK_FS_META_TYPE_ENUM.valueOf(rs.getShort("meta_type")),
+						TSK_FS_NAME_FLAG_ENUM.valueOf(rs.getShort("dir_flags")),
+						rs.getShort("meta_flags"),
+						rs.getLong("size"),
+						rs.getString("md5"), FileKnown.valueOf(rs.getByte("known")), parentPath);
+				children.add(lf);
+			} else if (type == TSK_DB_FILES_TYPE_ENUM.DERIVED) {
+				final DerivedFile df = rsHelper.derivedFile(rs, parentId);
+				children.add(df);
+			} else if (type == TSK_DB_FILES_TYPE_ENUM.LOCAL) {
+				final LocalFile lf = rsHelper.localFile(rs, parentId);
+				children.add(lf);
+			}
+		}
+		return children;
+	}
+
+	/**
+	 * Get list of IDs for abstract files of a given type that are children of a given content.
+	 * @param parent Object to find children for
+	 * @param type Type of children to find  IDs for
+	 * @return
+	 * @throws TskCoreException 
+	 */
+	List<Long> getAbstractFileChildrenIds(Content parent, TSK_DB_FILES_TYPE_ENUM type) throws TskCoreException {
+		final List<Long> children = new ArrayList<Long>();
+
+		dbReadLock();
+		try {
+
+			getAbstractFileChildrenIdsByType.setLong(1, parent.getId());
+			getAbstractFileChildrenIdsByType.setShort(2, type.getFileType());
+
+			ResultSet rs = getAbstractFileChildrenIdsByType.executeQuery();
 
 			while (rs.next()) {
-				if (type == TSK_DB_FILES_TYPE_ENUM.FS) {
-					FsContent result;
-					if (rs.getShort("meta_type") == TSK_FS_META_TYPE_ENUM.TSK_FS_META_TYPE_DIR.getValue()) {
-						result = rsHelper.directory(rs, null);
-					} else {
-						result = rsHelper.file(rs, null);
-					}
-					children.add(result);
-				} else if (type == TSK_DB_FILES_TYPE_ENUM.VIRTUAL_DIR) {
-					VirtualDirectory virtDir = rsHelper.virtualDirectory(rs);
-					children.add(virtDir);
-				} else if (type == TSK_DB_FILES_TYPE_ENUM.UNALLOC_BLOCKS
-						|| type == TSK_DB_FILES_TYPE_ENUM.CARVED) {
-					String parentPath = rs.getString("parent_path");
-					if (parentPath == null) {
-						parentPath = "";
-					}
-					final LayoutFile lf =
-							new LayoutFile(this, rs.getLong("obj_id"), rs.getString("name"),
-							type,
-							TSK_FS_NAME_TYPE_ENUM.valueOf(rs.getShort("dir_type")),
-							TSK_FS_META_TYPE_ENUM.valueOf(rs.getShort("meta_type")),
-							TSK_FS_NAME_FLAG_ENUM.valueOf(rs.getShort("dir_flags")),
-							rs.getShort("meta_flags"),
-							rs.getLong("size"),
-							rs.getString("md5"), FileKnown.valueOf(rs.getByte("known")), parentPath);
-					children.add(lf);
-				} else if (type == TSK_DB_FILES_TYPE_ENUM.DERIVED) {
-					final DerivedFile df = rsHelper.derivedFile(rs, parentId);
-					children.add(df);
-				} else if (type == TSK_DB_FILES_TYPE_ENUM.LOCAL) {
-					final LocalFile lf = rsHelper.localFile(rs, parentId);
-					children.add(lf);
-				}
+				children.add(rs.getLong(1));
 			}
 			rs.close();
 		} catch (SQLException ex) {
@@ -2290,15 +2399,19 @@ public class SleuthkitCase {
 		}
 		return children;
 	}
-
-	List<Long> getAbstractFileChildrenIds(Content parent, TSK_DB_FILES_TYPE_ENUM type) throws TskCoreException {
+	
+	/**
+	 * Get list of IDs for abstract files that are children of a given content.
+	 * @param parent Object to find children for
+	 * @return
+	 * @throws TskCoreException 
+	 */
+	List<Long> getAbstractFileChildrenIds(Content parent) throws TskCoreException {
 		final List<Long> children = new ArrayList<Long>();
 
 		dbReadLock();
 		try {
-
 			getAbstractFileChildrenIds.setLong(1, parent.getId());
-			getAbstractFileChildrenIds.setShort(2, type.getFileType());
 
 			ResultSet rs = getAbstractFileChildrenIds.executeQuery();
 
@@ -4443,103 +4556,6 @@ public class SleuthkitCase {
 		return children;
 	}
 
-	/**
-	 * Returns a list of direct children for a given file system
-	 *
-	 * @param fs file system to get the list of children for
-	 * @return the list of direct files children of the filesystem
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Content> getFileSystemChildren(FileSystem fs) throws TskCoreException {
-		List<Content> ret = new ArrayList<Content>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildren(fs, type));
-		}
-		return ret;
-	}
-
-	/**
-	 * Returns a list of direct children IDs for a given file system
-	 *
-	 * @param fs file system to get the list of children for
-	 * @return the list of direct files children IDs of the filesystem
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Long> getFileSystemChildrenIds(FileSystem fs) throws TskCoreException {
-		List<Long> ret = new ArrayList<Long>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildrenIds(fs, type));
-		}
-		return ret;
-	}
-
-	/**
-	 * Returns a list of direct children for a given directory
-	 *
-	 * @param dir directory to get the list of direct children for
-	 * @return list of direct children (files) for a given directory
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Content> getDirectoryChildren(Directory dir) throws TskCoreException {
-		List<Content> ret = new ArrayList<Content>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildren(dir, type));
-		}
-		return ret;
-	}
-
-	/**
-	 * Returns a list of direct children IDs for a given directory
-	 *
-	 * @param dir directory to get the list of direct children for
-	 * @return list of direct children (files) IDs for a given directory
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Long> getDirectoryChildrenIds(Directory dir) throws TskCoreException {
-		List<Long> ret = new ArrayList<Long>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildrenIds(dir, type));
-		}
-		return ret;
-	}
-
-	/**
-	 * Returns a list of all direct children for a given virtual directory
-	 *
-	 * @param vDir virtual directory to get the list of direct children for
-	 * @return list of direct children (layout/local files or directories) for a
-	 * given virtual directory
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Content> getVirtualDirectoryChildren(VirtualDirectory vDir) throws TskCoreException {
-		List<Content> ret = new ArrayList<Content>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildren(vDir, type));
-		}
-		return ret;
-	}
-
-	/**
-	 * Returns a list of direct children IDs for a given layout directory
-	 *
-	 * @param ldir layout directory to get the list of direct children for
-	 * @return list of direct children IDs (layout files or layout directories)
-	 * for a given layout directory
-	 * @throws TskCoreException thrown if a critical error occurred within tsk
-	 * core
-	 */
-	List<Long> getLayoutDirectoryChildrenIds(VirtualDirectory ldir) throws TskCoreException {
-		List<Long> ret = new ArrayList<Long>();
-		for (TskData.TSK_DB_FILES_TYPE_ENUM type : TskData.TSK_DB_FILES_TYPE_ENUM.values()) {
-			ret.addAll(getAbstractFileChildrenIds(ldir, type));
-		}
-		return ret;
-	}
 
 	/**
 	 * Returns a map of image object IDs to a list of fully qualified file paths
@@ -5630,49 +5646,70 @@ public class SleuthkitCase {
 	}	
 
 	/**
-	 * Inserts row into the reports table in the case database.
-     * @param [in] relPath The path of the report file, relative to the database (case directory in Autopsy).
-	 * @param [in] displayName The display name for the new tag name.
+	 * Inserts a row into the reports table in the case database.
+	 * @param [in] localPath The path of the report file, must be in the database directory (case directory in Autopsy) or one of its subdirectories.
+	 * @param [in] sourceModuleName The name of the module that created the report.
+	 * @param [in] reportName The report name, may be empty.
 	 * @return A Report data transfer object (DTO) for the new row.
 	 * @throws TskCoreException 
 	 */
-	public Report addReport(String relPath, String displayName) throws TskCoreException {
+	public Report addReport(String localPath, String sourceModuleName, String reportName) throws TskCoreException {
 		dbWriteLock();
+		ResultSet resultSet = null;
 		try {
-			// Figure out the date-time of this report
-			long dateTime = 0;
-			
+			// Make sure the local path of the report is in the database directory
+			// or one of its subdirectories.
+			String relativePath = "";
 			try {
-				String fullpath = getDbDirPath() + java.io.File.separator + relPath;
-				java.io.File tempFile = new java.io.File(fullpath);
-                // convert to UNIX epoch (seconds, not milliseconds)
-				dateTime = tempFile.lastModified() / 1000;
-			} catch(Exception ex) {
-				throw new TskCoreException("Could not get datetime for path " + relPath, ex);
+				Path path = Paths.get(localPath);
+				Path pathBase = Paths.get(getDbDirPath());
+				relativePath = pathBase.relativize(path).toString();
+			} catch (IllegalArgumentException ex) {
+				String errorMessage = String.format("Local path %s not in the database directory or one of its subdirectories",
+						localPath);
+				throw new TskCoreException(errorMessage, ex);
 			}
-			
-			// INSERT INTO reports (path, crtime, display_name) VALUES (?, ?, ?)			
+						
+			// Figure out the create time of the report.
+			long createTime = 0;			
+			try {
+				java.io.File tempFile = new java.io.File(localPath);
+                // Convert to UNIX epoch (seconds, not milliseconds).
+				createTime = tempFile.lastModified() / 1000;
+			} catch(Exception ex) {
+				throw new TskCoreException("Could not get create time for report at " + localPath, ex);
+			}
+									
+			// INSERT INTO reports (path, crtime, src_module_name, display_name) VALUES (?, ?, ?, ?)			
 			insertIntoReports.clearParameters(); 			
-			insertIntoReports.setString(1, relPath);			
-			insertIntoReports.setLong(2, dateTime);
-			insertIntoReports.setString(3, displayName);			
+			insertIntoReports.setString(1, relativePath);			
+			insertIntoReports.setLong(2, createTime);
+			insertIntoReports.setString(3, sourceModuleName);			
+			insertIntoReports.setString(4, reportName);			
 			insertIntoReports.executeUpdate();
 
 			// SELECT MAX(report_id) FROM reports
-			ResultSet resultSet = selectMaxIdFromReports.executeQuery();
+			resultSet = selectMaxIdFromReports.executeQuery();
 			Long reportID = resultSet.getLong(1);
-			resultSet.close();
 			
-			return new Report(reportID, relPath, dateTime, displayName);			
+			return new Report(reportID, localPath, createTime, sourceModuleName, reportName);			
 		}
 		catch (SQLException ex) {
-			throw new TskCoreException("Error adding row for " + displayName + " report to reports table", ex);
+			throw new TskCoreException("Error adding row for report " + localPath + " to reports table", ex);
 		}
 		finally {
+			// Note: this can be done much more cleanly and simply with 
+			// try-with-resources in Java 7 or higher.
+			try {
+				if (resultSet != null) {
+					resultSet.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close ResultSet", ex);
+			}
 			dbWriteUnlock();
 		}
     }
-
 	
 	/**
 	 * Selects all of the rows from the reports table in the case database.
@@ -5681,23 +5718,33 @@ public class SleuthkitCase {
 	 */
 	public List<Report> getAllReports() throws TskCoreException {
 		dbReadLock();		
+		ResultSet resultSet = null;
 		try {
-			ArrayList<Report> reports = new ArrayList<Report>();
-			
+			ArrayList<Report> reports = new ArrayList<Report>();			
 			// SELECT * FROM reports
-			ResultSet resultSet = selectAllFromReports.executeQuery();
+			resultSet = selectAllFromReports.executeQuery();
 			while (resultSet.next()) {
 				reports.add(new Report(resultSet.getLong("report_id"), 
                     getDbDirPath() + java.io.File.separator + resultSet.getString("path"), 
-					resultSet.getLong("crtime"), resultSet.getString("display_name"))); 
+					resultSet.getLong("crtime"), 
+					resultSet.getString("src_module_name"),
+			        resultSet.getString("report_name"))); 
 			} 
-			resultSet.close();
 			return reports;
 		}
 		catch (SQLException ex) {
 			throw new TskCoreException("Error selecting rows from reports table", ex);
 		}
 		finally {
+			// Note: this can be done much more cleanly and simply with 
+			// try-with-resources in Java 7 or higher.
+			try {
+				if (resultSet != null) {
+					resultSet.close();
+				}			
+			} catch (SQLException ex) {
+				logger.log(Level.SEVERE, "Failed to close ResultSet", ex);
+			}
 			dbReadUnlock();
 		}					
 	}	

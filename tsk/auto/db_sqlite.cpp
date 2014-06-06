@@ -320,7 +320,7 @@ int
         "Error creating blackboard_attribute_types table: %s\n")
         ||
         attempt_exec
-        ("CREATE TABLE reports (report_id INTEGER PRIMARY KEY, path TEXT NOT NULL, crtime INTEGER NOT NULL, display_name TEXT NOT NULL)",
+        ("CREATE TABLE reports (report_id INTEGER PRIMARY KEY, path TEXT NOT NULL, crtime INTEGER NOT NULL, src_module_name TEXT NOT NULL, report_name TEXT NOT NULL)",
             "Error creating reports table: %s\n")) {
         return 1;
     }
@@ -349,13 +349,15 @@ int
     return
         // tsk_objects index
         attempt_exec("CREATE INDEX parObjId ON tsk_objects(par_obj_id);",
-        "Error creating tsk_objects index on par_obj_id: %s\n")||
+        "Error creating tsk_objects index on par_obj_id: %s\n") ||
         // file layout index
         attempt_exec("CREATE INDEX layout_objID ON tsk_file_layout(obj_id);",
-        "Error creating layout_objID index on tsk_file_layout: %s\n")||
+        "Error creating layout_objID index on tsk_file_layout: %s\n") ||
         // blackboard indexes
         attempt_exec("CREATE INDEX artifact_objID ON blackboard_artifacts(obj_id);",
-        "Error creating artifact_objID index on blackboard_artifacts: %s\n")||
+        "Error creating artifact_objID index on blackboard_artifacts: %s\n") ||
+        attempt_exec("CREATE INDEX artifact_typeID ON blackboard_artifacts(artifact_type_id);",
+        "Error creating artifact_objID index on blackboard_artifacts: %s\n") ||
         attempt_exec("CREATE INDEX attrsArtifactID ON blackboard_attributes(artifact_id);",
         "Error creating artifact_id index on blackboard_attributes: %s\n");
 }
